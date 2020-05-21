@@ -1,0 +1,355 @@
+---
+title: "Tovar-Ruben-ADA-Homework-4"
+author: "Ruben Tovar"
+date: "5/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(patchwork) # for plotting
+library(scales) # for log y axis scale
+library(collapse) # for `fmode()` to find mode
+library(BBmisc) # for %nin%
+library(devtools)
+library(tidycovid19)
+```
+```{r}
+merged <- download_merged_data(cached = TRUE)
+merged <- merged %>%
+  group_by(country, iso3c) %>%
+  arrange(country, iso3c, date) %>%
+  ## new code to replace NAs with zeros
+  mutate(
+    confirmed = ifelse(is.na(confirmed), 0, confirmed),
+    deaths = ifelse(is.na(deaths), 0, deaths),
+    recovered = ifelse(is.na(recovered), 0, recovered)
+  ) %>%
+  ## end of new code
+  mutate(
+    daily_confirmed = confirmed - lag(confirmed, n = 1),
+    daily_deaths = deaths - lag(deaths, n = 1),
+    daily_recovered = recovered - lag(recovered, n = 1)
+  ) %>%
+  mutate(
+    daily_confirmed = replace_na(daily_confirmed, 0),
+    daily_deaths = replace_na(daily_deaths, 0),
+    daily_recovered = replace_na(daily_recovered, 0)
+  ) %>%
+  ungroup() %>%
+  arrange(country, iso3c, date)
+
+add_world1 <- merged %>%
+  group_by(date) %>%
+  arrange(date) %>%
+  summarize(
+    country = "World", iso3c = NA,
+    confirmed = sum(confirmed, na.rm = TRUE),
+    deaths = sum(deaths, na.rm = TRUE),
+    recovered = sum(recovered, na.rm = TRUE),
+    timestamp = fmode(timestamp)
+  ) %>%
+  mutate(
+    daily_confirmed = confirmed - lag(confirmed, n = 1),
+    daily_deaths = deaths - lag(deaths, n = 1),
+    daily_recovered = recovered - lag(recovered, n = 1)
+  ) %>%
+  mutate(
+    daily_confirmed = replace_na(daily_confirmed, 0),
+    daily_deaths = replace_na(daily_deaths, 0),
+    daily_recovered = replace_na(daily_recovered, 0)
+  ) %>%
+  ungroup() %>%
+  arrange(country, iso3c, date)
+
+add_world2 <- merged %>%
+  group_by(country, iso3c) %>%
+  summarize(
+    population = fmode(population),
+    land_area_skm = fmode(land_area_skm),
+    timestamp = fmode(timestamp)
+  ) %>%
+  ungroup() %>%
+  summarize(
+    country = "World", iso3c = NA,
+    population = sum(population, na.rm = TRUE),
+    land_area_skm = sum(land_area_skm, na.rm = TRUE)
+  ) %>%
+  mutate(pop_density = population / land_area_skm)
+
+add_world <- left_join(add_world1, add_world2, by = c("country", "iso3c"))
+merged <- bind_rows(merged, add_world)
+
+cv_data <- pivot_longer(merged,
+  cols = c(
+    "confirmed", "deaths", "recovered",
+    "daily_confirmed", "daily_deaths", "daily_recovered"
+  ),
+  names_to = "variable", values_to = "cases"
+) %>%
+  arrange(country, variable, date) %>%
+  rename(area = land_area_skm, density = pop_density) %>%
+  mutate(rate = cases / population * 10^6) %>%
+  ## new code to omit data before 2020-05-11
+  filter(date < "2020-05-11")
+## end of new code
+```
+```{r}
+cv_summary <- function(d, country_list = "World",
+                       plot = TRUE, facet = "country",
+                       status = c("confirmed", "deaths", "recovered")) {
+
+  # based on `wes_palettes()` color schemes GrandBudapest1, IsleofDogs1,
+  # IsleofDogs2 from the {wesanderson} package
+  my_palette <- c(
+    "#5B1A18", "#FD6467", "#F1BB7B", "#D67236",
+    "#0F0D0E", "#9986A5", "#79402E", "#CCBA72", "#D9D0D3", "#8D8680",
+    "#EAD3BF", "#AA9486", "#B6854D", "#39312F", "#1C1718"
+  )
+
+  if (facet == "country") {
+    fill <- "variable"
+    n <- length(unique(d$variable)) / 2
+    # need only half of unique # of variable (3)
+  }
+
+  if (facet == "variable") {
+    fill <- "country"
+    n <- length(country_list)
+    # need number of countries
+  }
+
+  if ("All" %in% country_list) {
+    country_list <- unique(d$country)
+    country_list <- setdiff(country_list, "World")
+  }
+
+  if ("World" %in% country_list) {
+    d <- d %>% filter(country %in% country_list)
+
+    totals <- d %>%
+      group_by(variable) %>%
+      summarize(
+        country = "World",
+        cases = max(cases),
+        population = max(population),
+        area = max(area),
+        density = max(density),
+        rate = max(rate, na.rm = TRUE),
+        on = max(date)
+      ) %>%
+      select(country, variable, cases, population, area, density, rate, on) %>%
+      arrange(variable) %>%
+      ungroup()
+  }
+
+  if ("World" %nin% country_list) {
+    d <- d %>% filter(country %in% country_list)
+    totals <- d %>%
+      group_by(country, variable) %>%
+      summarize(
+        cases = max(cases),
+        population = max(population),
+        area = max(area),
+        density = max(density),
+        rate = max(rate, na.rm = TRUE),
+        on = max(date),
+        gdp_capita = fmode(gdp_capita),
+        income = fmode(income),
+        life_expectancy = fmode(life_expectancy),
+        max_sd = max(soc_dist),
+        max_mr = max(mov_rest)
+      ) %>%
+      select(
+        country, variable, cases, population, area, density, rate,
+        gdp_capita, income, life_expectancy, max_sd, max_mr, on
+      ) %>%
+      arrange(country, variable) %>%
+      ungroup()
+  }
+
+  if (plot == TRUE) {
+    cc <- filter(d, variable %in% status)
+    cum_cases_plot <- ggplot(
+      data = cc,
+      # use the tidy evaluation pronoun .data to slice the chosen fill
+      # variable from the data frame
+      aes(
+        x = date, y = cases + 1, color = .data[[fill]],
+        fill = .data[[fill]]
+      )
+    ) +
+      geom_point(size = 0.5) +
+      geom_line() +
+      # use the tidy evaluation pronoun .data to slice the chosen facet_wrap
+      # variable from the data frame
+      facet_wrap(~ .data[[facet]], ncol = 5) +
+      xlab("Date") +
+      ylab("Log Cumulative Cases") +
+      scale_y_log10(
+        breaks = trans_breaks("log10", function(x) 10^x),
+        labels = trans_format("log10", math_format(10^.x))
+      ) +
+      scale_color_manual(
+        aesthetics = c("color", "fill"),
+        name = NULL, values = my_palette
+      )
+
+    dc <- filter(d, variable %in% paste0("daily_", status))
+    daily_cases_plot <- ggplot(
+      data = dc,
+      aes(
+        x = date, y = cases, color = .data[[fill]],
+        fill = .data[[fill]]
+      )
+    ) +
+      geom_point(size = 0.5) +
+      geom_line() +
+      facet_wrap(~ .data[[facet]], ncol = 5) +
+      xlab("Date") +
+      ylab("Daily Cases") +
+      scale_color_manual(
+        aesthetics = c("color", "fill"),
+        name = NULL, values = my_palette
+      )
+  }
+
+  if (plot == TRUE) {
+    return(list(
+      totals = totals,
+      cum_cases_plot = cum_cases_plot,
+      daily_cases_plot = daily_cases_plot
+    ))
+  } else {
+    return(list(totals = totals))
+  }
+}
+```
+#############Challange 1#################
+```{r}
+cv_summary(cv_data)
+```
+############Challenge 2#################
+```{r}
+##plot data on confirmed coronavirus infections, deaths, and recoveries for the “Group of Seven” (G7) countries.
+##Facet your plots first by “country” and then by “variable”.
+
+G7<-c("United States", "United Kingdom", "Canada", "France", "Germany", "Italy","Japan", "China", "Russia", "Iran")
+
+cv_summary(cv_data, country_list = G7, facet = "country")
+
+cv_summary(cv_data, country_list = G7, facet = "variable")
+```
+################Challenge 3####################
+
+```{r}
+#ALL country data frame
+all_country <- cv_summary(cv_data, country_list = "All", plot = FALSE)
+
+all_country_fr <- as.data.frame(all_country$totals)
+
+d<- all_country_fr %>%
+  filter(population > 1000000)
+
+tibble(d)
+
+####How many countries does this tibble include?
+#930 countries 
+```
+
+############Challenge 4##########
+```{r}
+d %>%
+filter(variable == "confirmed") -> overall
+head(overall, 5)
+firmed_overall<- overall[order(-overall$rate), ]
+
+#Top 10
+top10<-(firmed_overall)
+top10
+
+d %>%
+filter(variable == "daily_confirmed") -> daily
+head(daily, 5)
+firmed_daily <- daily[order(-daily$rate), ]
+#Top 10
+top10daily<-(firmed_daily)
+top10daily
+
+```
+##########Challenge 5#########
+```{r}
+mult_lin_1<- lm(data = overall, rate ~ 1)
+
+par(mfrow=c(1,2))
+plot(mult_lin_1$residuals) 
+qqnorm(mult_lin_1$residuals) 
+shapiro.test(mult_lin_1$residuals) 
+summary(mult_lin_1) 
+
+mult_lin_2 <- lm(data = overall, rate ~ density + population + gdp_capita + income)
+plot(mult_lin$residuals) 
+plot
+qqnorm(mult_lin$residuals) 
+shapiro.test(mult_lin$residuals) 
+summary(mult_lin)
+
+#Transformation is neccessary given the distribution is skewed. 
+tran_overall <- overall
+tran_overall[tran_overall == 0] <- NA
+#tran_overall$gdp_capita
+tran <- lm(data = tran_overall, log(rate) ~ log(density) * log(population) * log(gdp_capita) * income)
+par(mfrow=c(1,2))
+plot(tran$residuals) 
+qqnorm(tran$residuals) 
+shapiro.test(tran$residuals) 
+
+#no estimates were significant
+
+tran2 <- lm(data = tran_overall, log(rate) ~ log(density) + log(population) + log(gdp_capita) + income)
+par(mfrow=c(1,2))
+plot(tran2$residuals)
+qqnorm(tran2$residuals)
+shapiro.test(tran2$residuals)
+summary(tran2)
+
+par(mfrow=c(1,1))
+hist(log(tran_overall$rate))
+```
+############Challenge 6###############
+
+#Run stepwise selection using AIC to evaluate whether the full model or a nested, simpler model is preferred. What is the best model (based on AIC) of the possible ones involving these 4 predictors? What are the “pseudo-R2” values associated with the full and “best” models?
+```{r}
+library(MASS) #form module 22.6
+
+step_full <- stepAIC(tran2, scope = . ~ ., direction = "both")
+
+detach(package:MASS)
+
+library(MuMIn)
+
+tran2 <- lm(data = tran_overall, log(rate) ~ log(density) + log(population) + log(gdp_capita) + income)
+tran3 <- lm(data = tran_overall, log(rate) ~ log(density) + log(gdp_capita))
+
+r.squaredGLMM(tran2)
+r.squaredGLMM(tran3)
+```
+########Challenge 7#########
+```{r}
+tran4 <- lm(data = overall2, log(rate) ~ log(density) + log(gdp_capita) + max_sd)
+tran5 <- lm(data = overall2, log(rate) ~ log(density) + log(gdp_capita) + max_mr)
+tran6 <- lm(data = overall2, log(rate) ~ log(density) + log(gdp_capita) + max_sd + max_mr)
+
+(aic_table <- aictab(list(tran3, tran4, tran5, tran6), modnames = c("tran3", "tran4", "tran5", "tran6")))
+r.squaredGLMM(tran3)
+r.squaredGLMM(tran4)
+r.squaredGLMM(tran5)
+r.squaredGLMM(tran6)
+```
+
+
+
