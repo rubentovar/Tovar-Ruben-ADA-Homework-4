@@ -243,6 +243,8 @@ G7<-c("United States", "United Kingdom", "Canada", "France", "Germany", "Italy",
 cv_summary(cv_data, country_list = G7, facet = "country")
 
 cv_summary(cv_data, country_list = G7, facet = "variable")
+
+#For some reason the gdp_capita can not be found now?
 ```
 ################Challenge 3####################
 
